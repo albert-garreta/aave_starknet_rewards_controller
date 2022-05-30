@@ -5,6 +5,7 @@ from starkware.cairo.common.cairo_builtins import HashBuiltin
 from starkware.cairo.common.uint256 import Uint256, uint256_eq, uint256_le, uint256_add, uint256_sub
 from starkware.cairo.common.alloc import alloc
 from starkware.starknet.common.syscalls import get_caller_address
+from starkware.cairo.common.registers import get_fp_and_pc
 
 from lib.interfaces.interfaces import IRewardsDistributor, ITransferStrategy, IScaledBalanceToken
 from lib.events import (
@@ -406,6 +407,130 @@ end
 # TODO: this
 # _claimALLRewards
 
+func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    asset_addresses_len : felt, asset_addresses : felt*, claimer_address, user_address, to_address
+) -> (
+    reward_addresses_list_len,
+    reward_addresses_list : felt*,
+    claimed_amounts_len,
+    claimed_amounts : Uint256*,
+):
+    alloc_locals
+
+    let (reward_addresses_list_len) = _reward_addresses_list_len.read()
+    let claimed_amounts_len = reward_addresses_list_len
+
+    let (reward_addresses_list : felt*) = alloc()
+    let (claimed_amounts : Uint256*) = alloc()
+
+    let (user_asset_balances_len : felt,
+        user_asset_balances : UserAssetBalance*) = get_user_asset_balances(
+        asset_addresses_len, asset_addresses, user_address
+    )
+    _update_data_multiple(user_address, user_asset_balances_len, user_asset_balances)
+
+    let (reward_addresses_list_len, reward_addresses_list : felt*, claimed_amounts_len,
+        claimed_amounts : Uint256*) = _claim_all_rewards_inner(
+        asset_addresses_len,
+        asset_addresses,
+        reward_addresses_list_len,
+        reward_addresses_list,
+        claimed_amounts_len,
+        claimed_amounts,
+        user_address,
+    )
+
+    return (reward_addresses_list_len, reward_addresses_list, claimed_amounts_len, claimed_amounts)
+end
+
+func _claim_all_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    asset_addresses_len : felt,
+    asset_addresses : felt*,
+    reward_addresses_list_len,
+    reward_addresses_list : felt*,
+    claimed_amounts_len,
+    claimed_amounts : Uint256*,
+    user_address,
+) -> (
+    reward_addresses_list_len,
+    reward_addresses_list : felt*,
+    claimed_amounts_len,
+    claimed_amounts : Uint256*,
+):
+    if asset_addresses_len == 0:
+        return (
+            reward_addresses_list_len, reward_addresses_list, claimed_amounts_len, claimed_amounts
+        )
+    end
+
+    let current_reward_address = [reward_addresses_list]
+
+    let (claimed_amount_of_current_reward : Uint256) = _claim_current_reward_for_all_assets(
+        asset_addresses_len, asset_addresses, user_address, current_reward_address
+    )
+
+    assert [claimed_amounts] = claimed_amount_of_current_reward
+    return _claim_all_rewards_inner(
+        asset_addresses_len,
+        asset_addresses,
+        reward_addresses_list_len - 1,
+        reward_addresses_list + 1,
+        claimed_amounts_len + 1,
+        claimed_amounts + Uint256.SIZE,
+        user_address,
+    )
+end
+
+func _claim_current_reward_for_all_assets{
+    syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
+}(asset_addresses_len : felt, asset_addresses : felt*, user_address, reward_address) -> (
+    claimed_amount_of_current_reward : Uint256
+):
+    let claimed_amount = Uint256(0, 0)
+    let (claimed_amount : Uint256) = _claim_current_reward_for_all_assets_inner(
+        asset_addresses_len, asset_addresses, user_address, reward_address, claimed_amount
+    )
+
+    return (claimed_amount)
+end
+
+func _claim_current_reward_for_all_assets_inner{
+    syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
+}(
+    asset_addresses_len : felt,
+    asset_addresses : felt*,
+    user_address,
+    reward_address,
+    claimed_amount : Uint256,
+) -> (new_claimed_amount : Uint256):
+    
+    alloc_locals
+    local syscall_ptr: felt* = syscall_ptr
+    
+    if asset_addresses_len == 0:
+        return (claimed_amount)
+    end
+    
+    let asset_address = [asset_addresses]
+
+    let (reward_for_current_asset : Uint256) = get_reward_accrued(
+        asset_address, reward_address, user_address
+    )
+    
+    # TODO: here we could avoid these if `reward_for_current_asset` is 0. I had some problems with revocations so for now I am making the update in all cases.
+    update_reward_accrued(asset_address, reward_address, user_address, new_amount=Uint256(0, 0))
+    # TODO: manage possible overflow
+    let (new_claimed_amount : Uint256, carry) = uint256_add(claimed_amount, reward_for_current_asset)
+    
+    return _claim_current_reward_for_all_assets_inner(
+        asset_addresses_len - 1,
+        asset_addresses + 1,
+        user_address,
+        reward_address,
+        new_claimed_amount,
+    )
+end
+
 func _transer_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     to_address, reward_address, amount : Uint256
 ):
@@ -480,6 +605,17 @@ end
 
 @storage_var
 func _emission_manager() -> (address : felt):
+end
+
+# "Simulation" of a list in StarkNet. Replaces:
+# address[] internal _rewardsList;
+@storage_var
+func _reward_addresses_list(index) -> (reward_address):
+end
+
+# This allows to retrieve the length of the list
+@storage_var
+func _reward_addresses_list_len() -> (len):
 end
 
 func only_emission_manager{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}():
