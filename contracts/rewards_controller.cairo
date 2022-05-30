@@ -3,11 +3,13 @@
 
 from starkware.cairo.common.cairo_builtins import HashBuiltin
 from starkware.cairo.common.uint256 import Uint256, uint256_eq, uint256_le, uint256_add, uint256_sub
+from starkware.cairo.common.math import assert_lt
 from starkware.cairo.common.alloc import alloc
 from starkware.starknet.common.syscalls import get_caller_address
 from starkware.cairo.common.registers import get_fp_and_pc
 
 from lib.interfaces.interfaces import IRewardsDistributor, ITransferStrategy, IScaledBalanceToken
+from lib.utils import addition_overflow_guard
 from lib.events import (
     transfer_strategy_installed,
     reward_oracle_updated,
@@ -103,6 +105,7 @@ func get_transfer_strategy{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, ran
 end
 
 # Originally defined in "RewardDataTypes.sol"
+# ERC20 uint256 attributes are encoded with the Uint256 struct since felts have 251 bits
 struct UserAssetBalance:
     member asset_address : felt
     member user_balance : Uint256
@@ -141,7 +144,7 @@ func _get_user_asset_balances_inner{
     if asset_addresses_len == 0:
         return (user_asset_balances_len, user_asset_balances)
     end
-    
+
     # Fill in the struct UserAssetBalance for the current asset
     # The current asset address is obtained with [asset_addresses]
     assert user_asset_balances.asset_address = [asset_addresses]
@@ -152,7 +155,7 @@ func _get_user_asset_balances_inner{
     )
     assert user_asset_balances.user_balance = user_balance
     assert user_asset_balances.total_supply = total_supply
-    
+
     # Next iteration via recurssion
     return _get_user_asset_balances_inner(
         asset_addresses_len - 1,
@@ -167,13 +170,14 @@ end
 # Setters
 # ---------------------------------------------------------
 
+# Originally defined in `RewardsDataTypes.sol`
 struct RewardsConfigInput:
     member emission_per_second : Uint256
     member total_supply : Uint256
     member distribution_end : felt
     member asset_address : felt
     member reward_address : felt
-    # differences here
+    # As before: we use an address instead of an interface as data type
     member transfer_strategy_address : felt
     member reward_oracle_address : felt
 end
@@ -182,9 +186,11 @@ end
 func configure_assets{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     config_len, config : RewardsConfigInput*
 ):
-    # new
+    # Originally this was a function modifier
     only_emission_manager()
+    # Loop vua recursion
     _configure_assets_inner(config_len, config)
+    # Call `_configureAssets` from `RewardsDistributor`
     _configure_assets_RewardDistributor(config_len, config)
     return ()
 end
@@ -196,9 +202,11 @@ func _configure_assets_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, r
         return ()
     end
 
+    # Total supply of the asset
     let (total_supply) = IScaledBalanceToken.get_scaled_total_supply(
         contract_address=config.asset_address
     )
+    # Save total_supply in the RewardsConfigInput struct
     assert config.total_supply = total_supply
 
     _install_transfer_strategy_address(config.reward_address, config.transfer_strategy_address)
@@ -215,6 +223,7 @@ end
 func set_transfer_strategy_address{
     syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
 }(reward_address, transfer_strategy_address):
+    # Modifier
     only_emission_manager()
     _install_transfer_strategy_address(reward_address, transfer_strategy_address)
     return ()
@@ -223,15 +232,17 @@ end
 func _install_transfer_strategy_address{
     syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
 }(reward_address, transfer_strategy_address):
-    # TODO:
-    # require(address(transferStrategy) != address(0), 'STRATEGY_CAN_NOT_BE_ZERO');
+    # TODO: check if this is a good StarkNet equivalent (same todo for all similar asserts in this contract)
+    with_attr error_message("STRATEGY_ADDRESS_CAN_NOT_BE_ZERO"):
+        assert_lt(0, transfer_strategy_address)
+    end
 
     # No need for this: an EOA account can only call a contract with an __execute__ function
     # require(_isContract(address(transferStrategy)) == true, 'STRATEGY_MUST_BE_CONTRACT');
 
     _transfer_strategy_address.write(reward_address, transfer_strategy_address)
 
-    # NOTE: Emit event
+    # Emit event
     transfer_strategy_installed.emit(reward_address, transfer_strategy_address)
     return ()
 end
@@ -276,17 +287,52 @@ end
 func claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_addresses_len, asset_addresses : felt*, amount : Uint256, to_address, reward_address
 ) -> (claimed_amount : Uint256):
-    # TODO: this
-    # require(to != address(0), 'INVALID_TO_ADDRESS');
+    with_attr error_message("INVALID_TO_ADDRESS"):
+        assert_lt(0, to_address)
+    end
 
     # Equivalent of msg.sender
     let (caller_address) = get_caller_address()
+
     let (claimed_amount : Uint256) = _claim_rewards(
         asset_addresses_len=asset_addresses_len,
         asset_addresses=asset_addresses,
         amount=amount,
         claimer_address=caller_address,
         user_address=caller_address,
+        to_address=to_address,
+        reward_address=reward_address,
+    )
+    return (claimed_amount)
+end
+
+# As before but now the `user_address` can be different than `caller_address`
+@external
+func claim_rewards_on_behalf{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    asset_addresses_len,
+    asset_addresses : felt*,
+    amount : Uint256,
+    user_address,
+    to_address,
+    reward_address,
+):
+    # Equivalent of using the "modifier" `onlyAuthorizedClaimers`
+    let (caller_address) = get_caller_address()
+    only_authorized_claimers(caller_address, user_address)
+
+    with_attr error_message("INVALID_TO_ADDRESS"):
+        assert_lt(0, user_address)
+    end
+    with_attr error_message("INVALID_TO_ADDRESS"):
+        assert_lt(0, to_address)
+    end
+
+    let (claimed_amount : Uint256) = _claim_rewards(
+        asset_addresses_len=asset_addresses_len,
+        asset_addresses=asset_addresses,
+        amount=amount,
+        claimer_address=caller_address,
+        user_address=user_address,
         to_address=to_address,
         reward_address=reward_address,
     )
@@ -314,22 +360,25 @@ func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_chec
     if is_amount_zero == 1:
         return (Uint256(0, 0))
     end
-
+    
+    let total_rewards = Uint256(0, 0)
+    
+    # Equivalent of calling _updateDataMultiple 
+    # Accrues all the rewards of the assets specified in the userAssetBalances list
+    # UserAssetBalance : (asset, userBalance, totalSupply)
     let (user_asset_balances_len : felt,
         user_asset_balances : UserAssetBalance*) = get_user_asset_balances(
         asset_addresses_len, asset_addresses, user_address
     )
     _update_data_multiple(user_address, user_asset_balances_len, user_asset_balances)
 
-    # We use Uint256
-    let total_rewards = Uint256(0, 0)
-
+    # Rewards are collected here
     let (total_rewards : Uint256) = _claim_rewards_inner(
         asset_addresses_len, asset_addresses, amount, user_address, reward_address, total_rewards
     )
-
+    
+    # If no rewards have been collected, end
     let (is_total_rewards_zero) = uint256_eq(total_rewards, Uint256(0, 0))
-
     # Prevents revocation
     local syscall_ptr : felt* = syscall_ptr
     if is_total_rewards_zero == 1:
@@ -337,7 +386,8 @@ func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_chec
     end
 
     _transer_rewards(to_address, reward_address, total_rewards)
-
+    
+    # Event
     rewards_claimed.emit(user_address, reward_address, to_address, total_rewards)
     return (total_rewards)
 end
@@ -363,8 +413,10 @@ func _claim_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, rang
     # Replaces `_assets[asset].rewards[reward].usersData[user].accrued`
     let (reward_accrued : Uint256) = get_reward_accrued(asset_address, reward_address, user_address)
 
-    # TODO: what to do with overflows here
     let (total_rewards : Uint256, carry) = uint256_add(total_rewards, reward_accrued)
+    # Take care of possible overflow
+    addition_overflow_guard(carry)
+
 
     let (is_total_rewards_le_amount) = uint256_le(total_rewards, amount)
     if is_total_rewards_le_amount == 1:
@@ -386,8 +438,8 @@ func _claim_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, rang
     end
 end
 
-# TODO: document
-# New function
+
+# Equivalent of `_assets[asset].rewards[reward].usersData[user].accrued`
 func get_reward_accrued{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_address, reward_address, user_address
 ) -> (amount_accrued : Uint256):
@@ -398,8 +450,7 @@ func get_reward_accrued{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_
     return (amount_accrued)
 end
 
-# TODO: document
-# New function
+# Equivalent of `_assets[asset].rewards[reward].usersData[user].accrued = new_amount`
 func update_reward_accrued{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_address, reward_address, user_address, new_amount : Uint256
 ):
@@ -548,10 +599,11 @@ func _claim_current_reward_for_all_assets_inner{
 
     # TODO: here we could avoid these if `reward_for_current_asset` is 0. I had some problems with revocations so for now I am making the update in all cases.
     update_reward_accrued(asset_address, reward_address, user_address, new_amount=Uint256(0, 0))
-    # TODO: manage possible overflow
     let (new_claimed_amount : Uint256, carry) = uint256_add(
         claimed_amount, reward_for_current_asset
     )
+    # Take care of possible overflow
+    addition_overflow_guard(carry)
 
     return _claim_current_reward_for_all_assets_inner(
         asset_addresses_len - 1,
@@ -630,13 +682,19 @@ end
 func _reward_addresses_list_len() -> (len):
 end
 
+# Asserts that the caller is is the emission_manager (= the admin)
 func only_emission_manager{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}():
+    # Equivalent of `msg.sender`
     let (caller_address) = get_caller_address()
     let (emission_manager_address) = _emission_manager.read()
-    assert caller_address = emission_manager_address
+    with_attr error_message("NOT_EMISSION_MANAGER"):
+        assert caller_address = emission_manager_address
+    end
     return ()
 end
 
+
+# Functions from RewardsDistributor.sol, added here as dummys
 func _configure_assets_RewardDistributor{
     syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
 }(config_len, config : RewardsConfigInput*):
