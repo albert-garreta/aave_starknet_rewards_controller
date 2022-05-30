@@ -16,6 +16,9 @@ end
 
 @contract_interface
 namespace IScaledBalanceToken:
-    func get_scaled_total_supply() -> (res):
+    func get_scaled_total_supply() -> (supply: Uint256):
+    end
+    
+    func get_scaled_user_balance_and_supply(user_address) -> (scaled_balance: Uint256, supply: Uint256):
     end
 end

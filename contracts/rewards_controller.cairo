@@ -3,6 +3,7 @@
 
 from starkware.cairo.common.cairo_builtins import HashBuiltin
 from starkware.cairo.common.uint256 import Uint256, uint256_eq, uint256_le, uint256_add, uint256_sub
+from starkware.cairo.common.alloc import alloc
 from starkware.starknet.common.syscalls import get_caller_address
 
 from interfaces.interfaces import IRewardsDistributor, ITransferStrategy, IScaledBalanceToken
@@ -10,11 +11,11 @@ from interfaces.interfaces import IRewardsDistributor, ITransferStrategy, IScale
 
 # TODO: comment
 @storage_var
-func rewards_distributor_address() -> (address : felt):
+func _rewards_distributor_address() -> (address : felt):
 end
 
 @storage_var
-func revision() -> (res : felt):
+func _revision() -> (res : felt):
 end
 
 # Addresses are felts
@@ -41,7 +42,7 @@ end
 func constructor{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     emission_manager_address : felt
 ):
-    let (rewards_dist) = rewards_distributor_address.read()
+    let (rewards_dist) = _rewards_distributor_address.read()
     IRewardsDistributor._set_emission_manager(
         contract_address=rewards_dist, emission_manager_address=emission_manager_address
     )
@@ -60,14 +61,99 @@ end
 # Getters
 # ---------------------------------------------------------
 
+@view
+func get_claimer{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    user_address
+) -> (claimer_address):
+    let (claimer_address) = _authorized_claimers.read(user_address)
+    return (claimer_address)
+end
+
+@view
+func get_revision{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}() -> (
+    revision
+):
+    let (revision) = _revision.read()
+    return (revision)
+end
+
+@view
+func get_reward_oracle{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    reward_address
+) -> (oracle_address):
+    let (oracle_address) = _reward_oracle_address.read(reward_address)
+    return (oracle_address)
+end
+
+@view
+func get_transfer_strategy{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    reward_address
+) -> (transfer_strategy_address):
+    let (transfer_strategy_address) = _transfer_strategy_address.read(reward_address)
+    return (transfer_strategy_address)
+end
+
+struct UserAssetBalance:
+    member asset_address : felt
+    member user_balance : Uint256
+    member total_supply : Uint256
+end
+
+@view
+func get_user_asset_balances{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    asset_addresses_len : felt, asset_addresses : felt*, user_address
+) -> (user_asset_balances_len, user_asset_balances: UserAssetBalance*):
+    # Replaces userAssetBalances = new RewardsDataTypes.UserAssetBalance[](assets.length);
+    let (user_asset_balances : UserAssetBalance*) = alloc()
+
+    let (user_asset_balances_len,
+        user_asset_balances : UserAssetBalance*) = _get_user_asset_balances_inner(
+        asset_addresses_len,
+        asset_addresses,
+        user_address,
+        user_asset_balances_len=0,
+        user_asset_balances=user_asset_balances,
+    )
+    return (user_asset_balances_len, user_asset_balances)
+end
+
+func _get_user_asset_balances_inner{
+    syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
+}(
+    asset_addresses_len,
+    asset_addresses : felt*,
+    user_address,
+    user_asset_balances_len,
+    user_asset_balances : UserAssetBalance*,
+) -> (user_asset_balances_len, user_asset_balances : UserAssetBalance*):
+    if asset_addresses_len == 0:
+        return (user_asset_balances_len, user_asset_balances)
+    end
+
+    assert user_asset_balances.asset_address = [asset_addresses]
+    let (user_balance : Uint256,
+        total_supply : Uint256) = IScaledBalanceToken.get_scaled_user_balance_and_supply(
+        contract_address=[asset_addresses], user_address=user_address
+    )
+    assert user_asset_balances.user_balance = user_balance
+    assert user_asset_balances.total_supply = total_supply
+
+    return _get_user_asset_balances_inner(
+        asset_addresses_len - 1,
+        asset_addresses + 1,
+        user_address,
+        user_asset_balances_len + 1,
+        user_asset_balances + UserAssetBalance.SIZE,
+    )
+end
+
 # ---------------------------------------------------------
 # Setters
 # ---------------------------------------------------------
 
 struct RewardsConfigInput:
-    # Should these be Uint256's?
-    member emission_per_second : felt
-    member total_supply : felt
+    member emission_per_second : Uint256
+    member total_supply : Uint256
     member distribution_end : felt
     member asset_address : felt
     member reward_address : felt
@@ -90,6 +176,10 @@ end
 func _configure_assets_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     config_len, config : RewardsConfigInput*
 ):
+    if config_len == 0:
+        return ()
+    end
+
     let (total_supply) = IScaledBalanceToken.get_scaled_total_supply(
         contract_address=config.asset_address
     )
@@ -100,9 +190,9 @@ func _configure_assets_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, r
     _set_reward_oracle_address(config.reward_address, config.reward_oracle_address)
 
     # Recurrence call instead of looping
-    _configure_assets_inner(config_len=config_len - 1, config=config + RewardsConfigInput.SIZE)
-
-    return ()
+    return _configure_assets_inner(
+        config_len=config_len - 1, config=config + RewardsConfigInput.SIZE
+    )
 end
 
 @external
@@ -189,11 +279,12 @@ func claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check
     return (claimed_amount)
 end
 
+# TODO: rest of external claim rewards
+
 # --------------------------------------------------------
 # Internal methods for claiming rewards
 # --------------------------------------------------------
 
-# TODO: what else should be Uint256?
 func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_addresses_len : felt,
     asset_addresses : felt*,
@@ -210,8 +301,9 @@ func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_chec
         return (Uint256(0, 0))
     end
 
-    # TODO: this
-    # _updateDataMultiple(user, _getUserAssetBalances(assets, user));
+    let (user_asset_balances_len : felt,
+        user_asset_balances : UserAssetBalance*) = get_user_asset_balances(asset_addresses_len, asset_addresses, user_address)
+    _update_data_multiple(user_address, user_asset_balances_len, user_asset_balances)
 
     # We use Uint256
     let total_rewards = Uint256(0, 0)
@@ -243,15 +335,19 @@ func _claim_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, rang
     reward_address,
     total_rewards : Uint256,
 ) -> (total_rewards : Uint256):
+    if asset_addresses_len == 0:
+        return (total_rewards)
+    end
+
     alloc_locals
     # Prevents revocation
-    local syscall_ptr: felt* = syscall_ptr
-    
+    local syscall_ptr : felt* = syscall_ptr
+
     let asset_address = [asset_addresses]
 
     # Replaces `_assets[asset].rewards[reward].usersData[user].accrued`
     let (reward_accrued : Uint256) = get_reward_accrued(asset_address, reward_address, user_address)
-    
+
     # TODO: what to do with overflows here
     let (total_rewards : Uint256, carry) = uint256_add(total_rewards, reward_accrued)
 
@@ -280,7 +376,7 @@ end
 func get_reward_accrued{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_address, reward_address, user_address
 ) -> (amount_accrued : Uint256):
-    let (user_data : UserData) = asset_reward_and_user_to_user_data.read(
+    let (user_data : UserData) = asset_reward_and_user_to_UserData.read(
         asset_address, reward_address, user_address
     )
     let amount_accrued : Uint256 = user_data.accrued
@@ -292,11 +388,11 @@ end
 func update_reward_accrued{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_address, reward_address, user_address, new_amount : Uint256
 ):
-    let (user_data : UserData) = asset_reward_and_user_to_user_data.read(
+    let (user_data : UserData) = asset_reward_and_user_to_UserData.read(
         asset_address, reward_address, user_address
     )
     let new_user_data = UserData(index=user_data.index, accrued=new_amount)
-    asset_reward_and_user_to_user_data.write(
+    asset_reward_and_user_to_UserData.write(
         asset_address, reward_address, user_address, new_user_data
     )
     return ()
@@ -333,13 +429,12 @@ end
 # --------------------------------------------------------
 
 # Big difference from the solidity code: AssetData contains two mappings which AFAIK cannot be reproduced in Cairo.
-# Instead, we use storage variables `reward_data` and `vailable_rewards`
+# Instead, we use storage variables `asset_and_reward_to_reward_data` and `vailable_rewards`
 struct AssetData:
     # NOTE: This is a uint128 in solidity, so we could use a felt here, but it could run into incompatibilities later if it has to be operated with a Uint256
     member available_rewards_count : Uint256
     member decimals : felt
 end
-
 
 struct RewardData:
     member index : felt
@@ -348,9 +443,8 @@ struct RewardData:
     member distribution_end : felt
 end
 
-
 struct UserData:
-    # matches the index in `reward_data(asset_address, reward_address).index`
+    # matches the index in `asset_and_reward_to_reward_data(asset_address, reward_address).index`
     member index : felt
     # in solidity this is actually a uint128, but we will need to operate it with Uint256's (I think)
     member accrued : Uint256
@@ -358,7 +452,7 @@ end
 
 # For each asset and reward, returns a struct containing information about the reward for such asset
 @storage_var
-func reward_data(asset_address, reward_address) -> (data : RewardData):
+func asset_and_reward_to_RewardData(asset_address, reward_address) -> (data : RewardData):
 end
 
 # Simulates a mapping from asset_address into a list of reward_addresses which are available for such asset_address
@@ -366,19 +460,17 @@ end
 func available_rewards(asset_address, reward_address_index) -> (reward_address):
 end
 
-
 @storage_var
-func asset_reward_and_user_to_user_data(asset_address, reward_address, user_address) -> (
+func asset_reward_and_user_to_UserData(asset_address, reward_address, user_address) -> (
     res : UserData
 ):
 end
-
 
 # --------------------------------------------
 
 # This would be the state variable _assets in the solidity version
 @storage_var
-func _assets_rewards(asset_address) -> (asset_and_reward_data : AssetData):
+func _assets_rewards(asset_address) -> (asset_and_asset_and_reward_to_reward_data : AssetData):
 end
 
 @storage_var
@@ -396,6 +488,13 @@ end
 func _configure_assets_RewardDistributor{
     syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
 }(config_len, config : RewardsConfigInput*):
+    # dummy
+    return ()
+end
+
+func _update_data_multiple{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    usser_address, user_asset_balances_len, user_asset_balances_array : UserAssetBalance*
+):
     # dummy
     return ()
 end
