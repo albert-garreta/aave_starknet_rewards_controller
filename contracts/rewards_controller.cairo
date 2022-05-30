@@ -14,52 +14,54 @@ from lib.events import (
     claimer_set,
     rewards_claimed,
 )
-# using SafeCast for uint256
 
-# TODO: comment
-@storage_var
-func _rewards_distributor_address() -> (address : felt):
-end
+# Probably we don't need this
+# using SafeCast for uint256
 
 @storage_var
 func _revision() -> (res : felt):
 end
 
 # Addresses are felts
+# Using '_address' in variable names to indicate so
 @storage_var
-func _authorized_claimers(user : felt) -> (claimer : felt):
+func _authorized_claimers(user_address : felt) -> (claimer_address : felt):
 end
 
-# Here originally the interface `ITransferStrategy` is returned. Instead return an address so that later an interface can be used with this address
+# Originally this returns `ITransferStrategy`
+# Instead we return an address so that later an interface can be used with this address
 @storage_var
 func _transfer_strategy_address(reward_address : felt) -> (address : felt):
 end
 
+# Similar as above
 @storage_var
 func _reward_oracle_address(reward_address : felt) -> (address : felt):
 end
 
-# // @alb asserts whether claimer is the address authorized by user
-# modifier onlyAuthorizedClaimers(address claimer, address user) {
-#   require(_authorizedClaimers[user] == claimer, # 'CLAIMER_UNAUTHORIZED');
-#   _;
-# }
+# Originally this was a modifier
+func only_authorized_claimers{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    claimer_address, user_address
+):
+    let (authorized_claimer) = _authorized_claimers.read(user_address)
+    with_attr error_message("CLAIMER_UNAUTHORIZED"):
+        assert authorized_claimer = claimer_address
+    end
+    return ()
+end
 
 @constructor
 func constructor{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     emission_manager_address : felt
 ):
-    let (rewards_dist) = _rewards_distributor_address.read()
-    IRewardsDistributor._set_emission_manager(
-        contract_address=rewards_dist, emission_manager_address=emission_manager_address
-    )
+    # Originally this passes `emission_manager_address` to the inherited `RewardsDistributor`.
+    # Here we merge the contracts into a single one.
+    # TODO: Is there a better way to handle inheritance in this context?
+    _emission_manager.write(emission_manager_address)
     return ()
 end
 
-# /**
-#  * @dev Initialize for RewardsController
-#  * @param emissionManager address of the EmissionManager
-#  **/
+# TODO: How are proxies handled in StarkNet
 # function initialize(address emissionManager) external initializer {
 #   _setEmissionManager(emissionManager);
 # }
@@ -100,6 +102,7 @@ func get_transfer_strategy{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, ran
     return (transfer_strategy_address)
 end
 
+# Originally defined in "RewardDataTypes.sol"
 struct UserAssetBalance:
     member asset_address : felt
     member user_balance : Uint256
@@ -113,6 +116,7 @@ func get_user_asset_balances{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, r
     # Replaces userAssetBalances = new RewardsDataTypes.UserAssetBalance[](assets.length);
     let (user_asset_balances : UserAssetBalance*) = alloc()
 
+    # Loops need to be implemented as recursive calls
     let (user_asset_balances_len,
         user_asset_balances : UserAssetBalance*) = _get_user_asset_balances_inner(
         asset_addresses_len,
@@ -133,18 +137,23 @@ func _get_user_asset_balances_inner{
     user_asset_balances_len,
     user_asset_balances : UserAssetBalance*,
 ) -> (user_asset_balances_len, user_asset_balances : UserAssetBalance*):
+    # Final return of the recursion
     if asset_addresses_len == 0:
         return (user_asset_balances_len, user_asset_balances)
     end
-
+    
+    # Fill in the struct UserAssetBalance for the current asset
+    # The current asset address is obtained with [asset_addresses]
     assert user_asset_balances.asset_address = [asset_addresses]
+    # Here we call a ScaledBalanceToken contract via an interface
     let (user_balance : Uint256,
         total_supply : Uint256) = IScaledBalanceToken.get_scaled_user_balance_and_supply(
         contract_address=[asset_addresses], user_address=user_address
     )
     assert user_asset_balances.user_balance = user_balance
     assert user_asset_balances.total_supply = total_supply
-
+    
+    # Next iteration via recurssion
     return _get_user_asset_balances_inner(
         asset_addresses_len - 1,
         asset_addresses + 1,
@@ -287,7 +296,7 @@ end
 # TODO: rest of external claim rewards
 
 # --------------------------------------------------------
-# Internal methods for claiming rewards
+# Internal method: _claim_rewards
 # --------------------------------------------------------
 
 func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
@@ -404,8 +413,28 @@ func update_reward_accrued{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, ran
     return ()
 end
 
-# TODO: this
-# _claimALLRewards
+func _transer_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+    to_address, reward_address, amount : Uint256
+):
+    let (transfer_strategy_address) = _transfer_strategy_address.read(reward_address)
+
+    let (success) = ITransferStrategy.perform_transfer(
+        contract_address=transfer_strategy_address,
+        to_address=to_address,
+        reward_address=reward_address,
+        amount=amount,
+    )
+
+    # Chek success and print error message if needed
+    with_attr error_message("TRANSFER_ERROR"):
+        assert success = 1
+    end
+    return ()
+end
+
+# --------------------------------------------------------
+# Internal method: _claim_all_rewards
+# --------------------------------------------------------
 
 func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_addresses_len : felt, asset_addresses : felt*, claimer_address, user_address, to_address
@@ -465,6 +494,7 @@ func _claim_all_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, 
 
     let current_reward_address = [reward_addresses_list]
 
+    # TODO: manage the list stuff
     let (claimed_amount_of_current_reward : Uint256) = _claim_current_reward_for_all_assets(
         asset_addresses_len, asset_addresses, user_address, current_reward_address
     )
@@ -503,25 +533,26 @@ func _claim_current_reward_for_all_assets_inner{
     reward_address,
     claimed_amount : Uint256,
 ) -> (new_claimed_amount : Uint256):
-    
     alloc_locals
-    local syscall_ptr: felt* = syscall_ptr
-    
+    local syscall_ptr : felt* = syscall_ptr
+
     if asset_addresses_len == 0:
         return (claimed_amount)
     end
-    
+
     let asset_address = [asset_addresses]
 
     let (reward_for_current_asset : Uint256) = get_reward_accrued(
         asset_address, reward_address, user_address
     )
-    
+
     # TODO: here we could avoid these if `reward_for_current_asset` is 0. I had some problems with revocations so for now I am making the update in all cases.
     update_reward_accrued(asset_address, reward_address, user_address, new_amount=Uint256(0, 0))
     # TODO: manage possible overflow
-    let (new_claimed_amount : Uint256, carry) = uint256_add(claimed_amount, reward_for_current_asset)
-    
+    let (new_claimed_amount : Uint256, carry) = uint256_add(
+        claimed_amount, reward_for_current_asset
+    )
+
     return _claim_current_reward_for_all_assets_inner(
         asset_addresses_len - 1,
         asset_addresses + 1,
@@ -529,25 +560,6 @@ func _claim_current_reward_for_all_assets_inner{
         reward_address,
         new_claimed_amount,
     )
-end
-
-func _transer_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
-    to_address, reward_address, amount : Uint256
-):
-    let (transfer_strategy_address) = _transfer_strategy_address.read(reward_address)
-
-    let (success) = ITransferStrategy.perform_transfer(
-        contract_address=transfer_strategy_address,
-        to_address=to_address,
-        reward_address=reward_address,
-        amount=amount,
-    )
-
-    # Chek success and print error message if needed
-    with_attr error_message("TRANSFER_ERROR"):
-        assert success = 1
-    end
-    return ()
 end
 
 # --------------------------------------------------------
@@ -625,7 +637,6 @@ func only_emission_manager{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, ran
     return ()
 end
 
-# TODO: name
 func _configure_assets_RewardDistributor{
     syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
 }(config_len, config : RewardsConfigInput*):
