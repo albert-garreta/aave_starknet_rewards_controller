@@ -7,7 +7,12 @@ from starkware.cairo.common.alloc import alloc
 from starkware.starknet.common.syscalls import get_caller_address
 
 from lib.interfaces.interfaces import IRewardsDistributor, ITransferStrategy, IScaledBalanceToken
-from lib.events import events
+from lib.events import (
+    transfer_strategy_installed,
+    reward_oracle_updated,
+    claimer_set,
+    rewards_claimed,
+)
 # using SafeCast for uint256
 
 # TODO: comment
@@ -217,7 +222,7 @@ func _install_transfer_strategy_address{
     _transfer_strategy_address.write(reward_address, transfer_strategy_address)
 
     # NOTE: Emit event
-    events.transfer_strategy_installed.emit(reward_address, transfer_strategy_address)
+    transfer_strategy_installed.emit(reward_address, transfer_strategy_address)
     return ()
 end
 
@@ -238,7 +243,7 @@ func _set_reward_oracle_address{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*
 
     _reward_oracle_address.write(reward_address, reward_oracle_address)
 
-    events.reward_oracle_updated(reward_address, reward_oracle_address)
+    reward_oracle_updated.emit(reward_address, reward_oracle_address)
     return ()
 end
 
@@ -249,7 +254,7 @@ func set_claimer{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_p
     only_emission_manager()
     _authorized_claimers.write(user_address, claimer_address)
 
-    events.claimer_set(user_address, claimer_address)
+    claimer_set.emit(user_address, claimer_address)
     return ()
 end
 
@@ -323,7 +328,7 @@ func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_chec
 
     _transer_rewards(to_address, reward_address, total_rewards)
 
-    events.rewards_claimed(user_address, reward_address, to_address, total_rewards)
+    rewards_claimed.emit(user_address, reward_address, to_address, total_rewards)
     return (total_rewards)
 end
 

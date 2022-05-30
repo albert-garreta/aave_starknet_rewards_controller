@@ -2,6 +2,23 @@
     {
         "members": [
             {
+                "name": "low",
+                "offset": 0,
+                "type": "felt"
+            },
+            {
+                "name": "high",
+                "offset": 1,
+                "type": "felt"
+            }
+        ],
+        "name": "Uint256",
+        "size": 2,
+        "type": "struct"
+    },
+    {
+        "members": [
+            {
                 "name": "asset_address",
                 "offset": 0,
                 "type": "felt"
@@ -19,23 +36,6 @@
         ],
         "name": "UserAssetBalance",
         "size": 5,
-        "type": "struct"
-    },
-    {
-        "members": [
-            {
-                "name": "low",
-                "offset": 0,
-                "type": "felt"
-            },
-            {
-                "name": "high",
-                "offset": 1,
-                "type": "felt"
-            }
-        ],
-        "name": "Uint256",
-        "size": 2,
         "type": "struct"
     },
     {
@@ -79,6 +79,74 @@
         "name": "RewardsConfigInput",
         "size": 9,
         "type": "struct"
+    },
+    {
+        "data": [
+            {
+                "name": "reward_address",
+                "type": "felt"
+            },
+            {
+                "name": "transfer_strategy_address",
+                "type": "felt"
+            }
+        ],
+        "keys": [],
+        "name": "transfer_strategy_installed",
+        "type": "event"
+    },
+    {
+        "data": [
+            {
+                "name": "reward_address",
+                "type": "felt"
+            },
+            {
+                "name": "reward_oracle_address",
+                "type": "felt"
+            }
+        ],
+        "keys": [],
+        "name": "reward_oracle_updated",
+        "type": "event"
+    },
+    {
+        "data": [
+            {
+                "name": "user_address",
+                "type": "felt"
+            },
+            {
+                "name": "claimer_address",
+                "type": "felt"
+            }
+        ],
+        "keys": [],
+        "name": "claimer_set",
+        "type": "event"
+    },
+    {
+        "data": [
+            {
+                "name": "user_address",
+                "type": "felt"
+            },
+            {
+                "name": "reward_address",
+                "type": "felt"
+            },
+            {
+                "name": "to_address",
+                "type": "felt"
+            },
+            {
+                "name": "total_rewards",
+                "type": "Uint256"
+            }
+        ],
+        "keys": [],
+        "name": "rewards_claimed",
+        "type": "event"
     },
     {
         "inputs": [
