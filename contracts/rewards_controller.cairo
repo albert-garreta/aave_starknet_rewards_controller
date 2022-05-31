@@ -339,7 +339,8 @@ func claim_rewards_on_behalf{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, r
     return (claimed_amount)
 end
 
-# TODO: rest of external claim rewards
+# TODO: The rest of external "claim rewards" functions are similar and 
+# I leave them unimplemented for now
 
 # --------------------------------------------------------
 # Internal method: _claim_rewards
@@ -492,6 +493,8 @@ end
 # --------------------------------------------------------
 # Internal method: _claim_all_rewards
 # --------------------------------------------------------
+
+# TODO: Test this function
 
 func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_addresses_len : felt, asset_addresses : felt*, claimer_address, user_address, to_address
