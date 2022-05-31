@@ -342,5 +342,41 @@
             }
         ],
         "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "name": "asset_addresses_len",
+                "type": "felt"
+            },
+            {
+                "name": "asset_addresses",
+                "type": "felt*"
+            },
+            {
+                "name": "amount",
+                "type": "Uint256"
+            },
+            {
+                "name": "user_address",
+                "type": "felt"
+            },
+            {
+                "name": "to_address",
+                "type": "felt"
+            },
+            {
+                "name": "reward_address",
+                "type": "felt"
+            }
+        ],
+        "name": "claim_rewards_on_behalf",
+        "outputs": [
+            {
+                "name": "claimed_amount",
+                "type": "Uint256"
+            }
+        ],
+        "type": "function"
     }
 ]

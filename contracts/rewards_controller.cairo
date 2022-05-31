@@ -8,7 +8,7 @@ from starkware.cairo.common.alloc import alloc
 from starkware.starknet.common.syscalls import get_caller_address
 from starkware.cairo.common.registers import get_fp_and_pc
 
-from lib.interfaces.interfaces import IRewardsDistributor, ITransferStrategy, IScaledBalanceToken
+from lib.interfaces.interfaces import ITransferStrategy, IScaledBalanceToken
 from lib.utils import addition_overflow_guard
 from lib.events import (
     transfer_strategy_installed,
@@ -315,12 +315,12 @@ func claim_rewards_on_behalf{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, r
     user_address,
     to_address,
     reward_address,
-):
+) -> (claimed_amount : Uint256):
     # Equivalent of using the "modifier" `onlyAuthorizedClaimers`
     let (caller_address) = get_caller_address()
     only_authorized_claimers(caller_address, user_address)
 
-    with_attr error_message("INVALID_TO_ADDRESS"):
+    with_attr error_message("INVALID_USER_ADDRESS"):
         assert_lt(0, user_address)
     end
     with_attr error_message("INVALID_TO_ADDRESS"):
@@ -360,10 +360,10 @@ func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_chec
     if is_amount_zero == 1:
         return (Uint256(0, 0))
     end
-    
+
     let total_rewards = Uint256(0, 0)
-    
-    # Equivalent of calling _updateDataMultiple 
+
+    # Equivalent of calling _updateDataMultiple
     # Accrues all the rewards of the assets specified in the userAssetBalances list
     # UserAssetBalance : (asset, userBalance, totalSupply)
     let (user_asset_balances_len : felt,
@@ -376,7 +376,7 @@ func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_chec
     let (total_rewards : Uint256) = _claim_rewards_inner(
         asset_addresses_len, asset_addresses, amount, user_address, reward_address, total_rewards
     )
-    
+
     # If no rewards have been collected, end
     let (is_total_rewards_zero) = uint256_eq(total_rewards, Uint256(0, 0))
     # Prevents revocation
@@ -386,7 +386,7 @@ func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_chec
     end
 
     _transer_rewards(to_address, reward_address, total_rewards)
-    
+
     # Event
     rewards_claimed.emit(user_address, reward_address, to_address, total_rewards)
     return (total_rewards)
@@ -399,7 +399,8 @@ func _claim_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, rang
     user_address,
     reward_address,
     total_rewards : Uint256,
-) -> (total_rewards : Uint256):
+) -> (new_total_rewards : Uint256):
+    # Final return of the recursion
     if asset_addresses_len == 0:
         return (total_rewards)
     end
@@ -408,36 +409,41 @@ func _claim_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, rang
     # Prevents revocation
     local syscall_ptr : felt* = syscall_ptr
 
+    # Gets the current asset_address in the array `asset_addresses`
     let asset_address = [asset_addresses]
 
-    # Replaces `_assets[asset].rewards[reward].usersData[user].accrued`
+    # Equivalent of `totalRewards += _assets[asset].rewards[reward].usersData[user].accrued`
     let (reward_accrued : Uint256) = get_reward_accrued(asset_address, reward_address, user_address)
+    # Note we cannot update the value of total_rewards in Cairo
+    let (new_total_rewards : Uint256, carry) = uint256_add(total_rewards, reward_accrued)
 
-    let (total_rewards : Uint256, carry) = uint256_add(total_rewards, reward_accrued)
-    # Take care of possible overflow
+    # Check for overflow
     addition_overflow_guard(carry)
-
 
     let (is_total_rewards_le_amount) = uint256_le(total_rewards, amount)
     if is_total_rewards_le_amount == 1:
+        # Equivalent of `_assets[asset].rewards[reward].usersData[user].accrued = 0`
         update_reward_accrued(asset_address, reward_address, user_address, Uint256(0, 0))
+
+        # Next iteration
         return _claim_rewards_inner(
             asset_addresses_len - 1,
             asset_addresses + 1,
             amount,
             user_address,
             reward_address,
-            total_rewards,
+            new_total_rewards,
         )
     else:
         let (difference : Uint256) = uint256_sub(total_rewards, amount)
         let (total_rewards : Uint256) = uint256_sub(total_rewards, difference)
+        # Only remove a little bit from the rewards accrued for this reward_address
         update_reward_accrued(asset_address, reward_address, user_address, difference)
 
-        return (total_rewards)
+        # Acts as a `break` instruction
+        return (new_total_rewards)
     end
 end
-
 
 # Equivalent of `_assets[asset].rewards[reward].usersData[user].accrued`
 func get_reward_accrued{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
@@ -476,7 +482,7 @@ func _transer_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_ch
         amount=amount,
     )
 
-    # Chek success and print error message if needed
+    # Chek success
     with_attr error_message("TRANSFER_ERROR"):
         assert success = 1
     end
@@ -496,19 +502,25 @@ func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_
     claimed_amounts : Uint256*,
 ):
     alloc_locals
-
+    # _rewardsList is the global list of reward addresses
+    # In Cairo we have to store its length separately
     let (reward_addresses_list_len) = _reward_addresses_list_len.read()
     let claimed_amounts_len = reward_addresses_list_len
-
+    
+    # Arrays to be returned
+    # List of reward addresses
     let (reward_addresses_list : felt*) = alloc()
+    # Claimed amount for each reward address
     let (claimed_amounts : Uint256*) = alloc()
-
+    
+    # Same as in _claim_rewards: accrues rewards
     let (user_asset_balances_len : felt,
         user_asset_balances : UserAssetBalance*) = get_user_asset_balances(
         asset_addresses_len, asset_addresses, user_address
     )
     _update_data_multiple(user_address, user_asset_balances_len, user_asset_balances)
 
+    # Do the claiming of rewards
     let (reward_addresses_list_len, reward_addresses_list : felt*, claimed_amounts_len,
         claimed_amounts : Uint256*) = _claim_all_rewards_inner(
         asset_addresses_len,
@@ -544,8 +556,14 @@ func _claim_all_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, 
     end
 
     let current_reward_address = [reward_addresses_list]
-
-    # TODO: manage the list stuff
+    
+    # NOTE: The order of the two loops in the solidity version is
+    # reversed here: 
+    # since claimed_amounts is what we want to return, due to 
+    # immutability of memory, it is better to:
+    # For each reward, loop through all the assets and collect the rewards,
+    # then update  "claimed_amounts[current index]" in a single step with the sum of all these rewards. 
+    # In solidity it is done in reverse
     let (claimed_amount_of_current_reward : Uint256) = _claim_current_reward_for_all_assets(
         asset_addresses_len, asset_addresses, user_address, current_reward_address
     )
@@ -597,12 +615,13 @@ func _claim_current_reward_for_all_assets_inner{
         asset_address, reward_address, user_address
     )
 
-    # TODO: here we could avoid these if `reward_for_current_asset` is 0. I had some problems with revocations so for now I am making the update in all cases.
+    # TODO: here we could avoid these calls if `reward_for_current_asset` is 0. I had some problems with revocations so for now I am making the update in all cases.
     update_reward_accrued(asset_address, reward_address, user_address, new_amount=Uint256(0, 0))
     let (new_claimed_amount : Uint256, carry) = uint256_add(
         claimed_amount, reward_for_current_asset
     )
-    # Take care of possible overflow
+
+    # Takes care of possible overflow
     addition_overflow_guard(carry)
 
     return _claim_current_reward_for_all_assets_inner(
@@ -622,14 +641,26 @@ end
 # AssetData, RewardData, UserData structs
 # --------------------------------------------------------
 
-# Big difference from the solidity code: AssetData contains two mappings which AFAIK cannot be reproduced in Cairo.
-# Instead, we use storage variables `asset_and_reward_to_reward_data` and `vailable_rewards`
+# Big difference from the solidity code: struct AssetData contains two mappings which AFAIK cannot be reproduced in Cairo.
+# Instead, we use storage variables `asset_and_reward_to_reward_data` and `available_rewards`
 struct AssetData:
     # NOTE: This is a uint128 in solidity, so we could use a felt here, but it could run into incompatibilities later if it has to be operated with a Uint256
     member available_rewards_count : Uint256
     member decimals : felt
 end
 
+# Replaces `mapping(address => RewardData) rewards;` from AssetData
+@storage_var
+func asset_and_reward_to_RewardData(asset_address, reward_address) -> (data : RewardData):
+end
+
+# Replaces `mapping(uint128 => address) availableRewards;` from AssetData
+# The uint128 is an index 
+@storage_var
+func available_rewards(asset_address, reward_address_index) -> (reward_address):
+end
+
+# "Tied" to an asset_address and a reward_address
 struct RewardData:
     member index : felt
     member emissions_per_second : felt
@@ -637,46 +668,37 @@ struct RewardData:
     member distribution_end : felt
 end
 
-struct UserData:
-    # matches the index in `asset_and_reward_to_reward_data(asset_address, reward_address).index`
-    member index : felt
-    # in solidity this is actually a uint128, but we will need to operate it with Uint256's (I think)
-    member accrued : Uint256
-end
-
-# For each asset and reward, returns a struct containing information about the reward for such asset
-@storage_var
-func asset_and_reward_to_RewardData(asset_address, reward_address) -> (data : RewardData):
-end
-
-# Simulates a mapping from asset_address into a list of reward_addresses which are available for such asset_address
-@storage_var
-func available_rewards(asset_address, reward_address_index) -> (reward_address):
-end
-
+# Replaces `mapping(address => UserData) usersData;` in RewardData
 @storage_var
 func asset_reward_and_user_to_UserData(asset_address, reward_address, user_address) -> (
     res : UserData
 ):
 end
 
-# --------------------------------------------
-
-# This would be the state variable _assets in the solidity version
-@storage_var
-func _assets_rewards(asset_address) -> (asset_and_asset_and_reward_to_reward_data : AssetData):
+# "Tied" to an asset_address, a reward_address, and a user_address
+# Indicates amount of reward accrued by the user for the asset
+struct UserData:
+    # matches the index in the corresponding `RewardData` 
+    # i.e. `asset_and_reward_to_reward_data(asset_address, reward_address).index`
+    member index : felt
+    # uint128 in solidity, but we will need to operate it with Uint256's
+    member accrued : Uint256
 end
+
+
+
+# --------------------------------------------
 
 @storage_var
 func _emission_manager() -> (address : felt):
 end
 
+# Used in _claim_all_rewards
 # "Simulation" of a list in StarkNet. Replaces:
 # address[] internal _rewardsList;
 @storage_var
 func _reward_addresses_list(index) -> (reward_address):
 end
-
 # This allows to retrieve the length of the list
 @storage_var
 func _reward_addresses_list_len() -> (len):
@@ -692,7 +714,6 @@ func only_emission_manager{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, ran
     end
     return ()
 end
-
 
 # Functions from RewardsDistributor.sol, added here as dummys
 func _configure_assets_RewardDistributor{
