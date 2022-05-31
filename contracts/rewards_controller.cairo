@@ -495,27 +495,19 @@ end
 
 func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_addresses_len : felt, asset_addresses : felt*, claimer_address, user_address, to_address
-) -> (
-    reward_addresses_list_len,
-    reward_addresses_list : felt*,
-    claimed_amounts_len,
-    claimed_amounts : Uint256*,
-):
+) -> (claimed_amounts_len, claimed_amounts : Uint256*):
     alloc_locals
     # _rewardsList is the global list of reward addresses
     # In Cairo we have to store its length separately
     let (reward_addresses_list_len) = _reward_addresses_list_len.read()
     let claimed_amounts_len = reward_addresses_list_len
 
-    # Arrays to be returned
-    # List of reward addresses
-    let (reward_addresses_list : felt*) = alloc()
-    # Claimed amount for each reward address
-    let (claimed_amounts : Uint256*) = alloc()
-
-    # NOTE: I don't understand why in solidity they care about the list `rewardsList`
+    # TODO: I don't understand why in the solidity code they care about the list `rewardsList`
     # It looks like they are copying the state variable `_rewardsList` to `rewardsList`, so why not just return `_rewardsList`?
     # I will be ignoring the code concerning `rewardsList` for now.
+
+    # Array to be returned: Claimed amount for each reward address
+    let (claimed_amounts : Uint256*) = alloc()
 
     # Same as in _claim_rewards: accrues rewards
     let (user_asset_balances_len : felt,
@@ -525,12 +517,10 @@ func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_
     _update_data_multiple(user_address, user_asset_balances_len, user_asset_balances)
 
     # Do the claiming of rewards
-    let (reward_addresses_list_len, reward_addresses_list : felt*, claimed_amounts_len,
-        claimed_amounts : Uint256*) = _claim_all_rewards_inner(
+    let (claimed_amounts_len, claimed_amounts : Uint256*) = _claim_all_rewards_inner(
         asset_addresses_len,
         asset_addresses,
         reward_addresses_list_len,
-        reward_addresses_list,
         claimed_amounts_len,
         claimed_amounts,
         user_address,
@@ -539,7 +529,6 @@ func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_
     # Transfer the rewards
     _claim_all_rewards_recursive_transfer(
         reward_addresses_list_len,
-        reward_addresses_list,
         claimed_amounts_len,
         claimed_amounts,
         user_address,
@@ -547,31 +536,26 @@ func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_
         claimer_address,
     )
 
-    return (reward_addresses_list_len, reward_addresses_list, claimed_amounts_len, claimed_amounts)
+    return (claimed_amounts_len, claimed_amounts)
 end
-
 
 func _claim_all_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_addresses_len : felt,
     asset_addresses : felt*,
-    reward_addresses_list_len,
-    reward_addresses_list : felt*,
+    inner_reward_addresses_list_len,
     claimed_amounts_len,
     claimed_amounts : Uint256*,
     user_address,
-) -> (
-    reward_addresses_list_len,
-    reward_addresses_list : felt*,
-    claimed_amounts_len,
-    claimed_amounts : Uint256*,
-):
+) -> (claimed_amounts_len, claimed_amounts : Uint256*):
     if asset_addresses_len == 0:
-        return (
-            reward_addresses_list_len, reward_addresses_list, claimed_amounts_len, claimed_amounts
-        )
+        return (claimed_amounts_len, claimed_amounts)
     end
 
-    let current_reward_address = [reward_addresses_list]
+    let (reward_addresses_list_len) = _reward_addresses_list_len.read()
+    # We want to read the reward addresses starting from index 0 to reward_addresses_list_len-1, not the other way around
+    let (current_reward_address) = _reward_addresses_list.read(
+        reward_addresses_list_len - inner_reward_addresses_list_len
+    )
 
     # NOTE: The order of the two loops in the solidity version is
     # reversed here:
@@ -583,19 +567,20 @@ func _claim_all_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, 
     let (claimed_amount_of_current_reward : Uint256) = _claim_current_reward_for_all_assets(
         asset_addresses_len, asset_addresses, user_address, current_reward_address
     )
-
+    
+    # "Store" the claimed amount in the array `claimed_amounts`
     assert [claimed_amounts] = claimed_amount_of_current_reward
     return _claim_all_rewards_inner(
         asset_addresses_len,
         asset_addresses,
-        reward_addresses_list_len - 1,
-        reward_addresses_list + 1,
+        inner_reward_addresses_list_len - 1,
         claimed_amounts_len + 1,
         claimed_amounts + Uint256.SIZE,
         user_address,
     )
 end
 
+# For a fixed reward_address and user, it loops over a list of asset addresses and claims all accrued rewards
 func _claim_current_reward_for_all_assets{
     syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
 }(asset_addresses_len : felt, asset_addresses : felt*, user_address, reward_address) -> (
@@ -650,29 +635,36 @@ func _claim_current_reward_for_all_assets_inner{
     )
 end
 
-
-
 func _claim_all_rewards_recursive_transfer{
     syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
 }(
-    reward_addresses_list_len,
-    reward_addresses_list : felt*,
+    inner_reward_addresses_list_len,
     claimed_amounts_len,
     claimed_amounts : Uint256*,
     user_address,
     to_address,
     claimer_address,
 ):
-    # Gets the current reward address and claimed amount
+    if inner_reward_addresses_list_len == 0:
+        return ()
+    end
+
+    # Gets the current reward address and claimed amount
     let amount : Uint256 = [claimed_amounts]
-    let reward_address = [reward_addresses_list]
+
+    # As before, we want to read the reward addresses starting from index 0 to reward_addresses_list_len-1, not the other way around
+    let (reward_addresses_list_len) = _reward_addresses_list_len.read()
+    let (current_reward_address) = _reward_addresses_list.read(
+        reward_addresses_list_len - inner_reward_addresses_list_len
+    )
+    let (reward_address) = _reward_addresses_list.read(current_reward_address)
+
     _transfer_rewards(to_address, reward_address, amount)
-    
+
     rewards_claimed.emit(user_address, reward_address, to_address, claimer_address, amount)
-    
+
     _claim_all_rewards_recursive_transfer(
-        reward_addresses_list_len - 1,
-        reward_addresses_list + 1,
+        inner_reward_addresses_list_len - 1,
         claimed_amounts_len - 1,
         claimed_amounts + Uint256.SIZE,
         user_address,
@@ -684,7 +676,7 @@ end
 
 # --------------------------------------------------------
 # --------------------------------------------------------
-# 
+#
 # Rewards Distributor
 #
 # Minimal implementation of some elements from `RewardsDistributor.sol`
@@ -705,7 +697,6 @@ struct AssetData:
     member decimals : felt
 end
 
-
 # "Tied" to an asset_address and a reward_address
 struct RewardData:
     member index : felt
@@ -713,7 +704,6 @@ struct RewardData:
     member last_update_timestamp : felt
     member distribution_end : felt
 end
-
 
 # Replaces `mapping(address => RewardData) rewards;` from AssetData
 @storage_var
@@ -725,7 +715,6 @@ end
 @storage_var
 func available_rewards(asset_address, reward_address_index) -> (reward_address):
 end
-
 
 # "Tied" to an asset_address, a reward_address, and a user_address
 # Indicates amount of reward accrued by the user for the asset
@@ -743,7 +732,6 @@ func asset_reward_and_user_to_UserData(asset_address, reward_address, user_addre
     res : UserData
 ):
 end
-
 
 # --------------------------------------------
 

@@ -6,4 +6,4 @@ Bot files `contracts/rewards_controller.cairo` and `lib/solidity_contracts/comme
 
 The project is built using nile's framework. 
 
-Tests may be written but this is not a priority for now.
+TODO: Basic tests
