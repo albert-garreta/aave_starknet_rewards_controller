@@ -58,12 +58,12 @@ func constructor{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_p
 ):
     # Originally this passes `emission_manager_address` to the inherited `RewardsDistributor`.
     # Here we merge the contracts into a single one.
-    # TODO: Is there a better way to handle inheritance in this context?
+    # Is there a better way to handle inheritance in this context?
     _emission_manager.write(emission_manager_address)
     return ()
 end
 
-# TODO: How are proxies handled in StarkNet
+# TODO: Check how proxies are handled in StarkNet
 # function initialize(address emissionManager) external initializer {
 #   _setEmissionManager(emissionManager);
 # }
@@ -385,10 +385,10 @@ func _claim_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_chec
         return (Uint256(0, 0))
     end
 
-    _transer_rewards(to_address, reward_address, total_rewards)
+    _transfer_rewards(to_address, reward_address, total_rewards)
 
     # Event
-    rewards_claimed.emit(user_address, reward_address, to_address, total_rewards)
+    rewards_claimed.emit(user_address, reward_address, to_address, claimer_address, total_rewards)
     return (total_rewards)
 end
 
@@ -470,7 +470,7 @@ func update_reward_accrued{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, ran
     return ()
 end
 
-func _transer_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
+func _transfer_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     to_address, reward_address, amount : Uint256
 ):
     let (transfer_strategy_address) = _transfer_strategy_address.read(reward_address)
@@ -506,13 +506,17 @@ func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_
     # In Cairo we have to store its length separately
     let (reward_addresses_list_len) = _reward_addresses_list_len.read()
     let claimed_amounts_len = reward_addresses_list_len
-    
+
     # Arrays to be returned
     # List of reward addresses
     let (reward_addresses_list : felt*) = alloc()
     # Claimed amount for each reward address
     let (claimed_amounts : Uint256*) = alloc()
-    
+
+    # NOTE: I don't understand why in solidity they care about the list `rewardsList`
+    # It looks like they are copying the state variable `_rewardsList` to `rewardsList`, so why not just return `_rewardsList`?
+    # I will be ignoring the code concerning `rewardsList` for now.
+
     # Same as in _claim_rewards: accrues rewards
     let (user_asset_balances_len : felt,
         user_asset_balances : UserAssetBalance*) = get_user_asset_balances(
@@ -532,8 +536,20 @@ func _claim_all_rewards{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_
         user_address,
     )
 
+    # Transfer the rewards
+    _claim_all_rewards_recursive_transfer(
+        reward_addresses_list_len,
+        reward_addresses_list,
+        claimed_amounts_len,
+        claimed_amounts,
+        user_address,
+        to_address,
+        claimer_address,
+    )
+
     return (reward_addresses_list_len, reward_addresses_list, claimed_amounts_len, claimed_amounts)
 end
+
 
 func _claim_all_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}(
     asset_addresses_len : felt,
@@ -556,14 +572,14 @@ func _claim_all_rewards_inner{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, 
     end
 
     let current_reward_address = [reward_addresses_list]
-    
+
     # NOTE: The order of the two loops in the solidity version is
-    # reversed here: 
-    # since claimed_amounts is what we want to return, due to 
+    # reversed here:
+    # since claimed_amounts is what we want to return, due to
     # immutability of memory, it is better to:
     # For each reward, loop through all the assets and collect the rewards,
-    # then update  "claimed_amounts[current index]" in a single step with the sum of all these rewards. 
-    # In solidity it is done in reverse
+    # then update  "claimed_amounts[current index]" in a single step with the sum of all these rewards.
+    # In the solidity contract this is done in reverse: first it iterates over the assets, and then over rewards
     let (claimed_amount_of_current_reward : Uint256) = _claim_current_reward_for_all_assets(
         asset_addresses_len, asset_addresses, user_address, current_reward_address
     )
@@ -615,7 +631,8 @@ func _claim_current_reward_for_all_assets_inner{
         asset_address, reward_address, user_address
     )
 
-    # TODO: here we could avoid these calls if `reward_for_current_asset` is 0. I had some problems with revocations so for now I am making the update in all cases.
+    # TODO: here we can avoid these calls if `reward_for_current_asset` is 0.
+    # I had some problems with revocations so for now I am making the update in all cases.
     update_reward_accrued(asset_address, reward_address, user_address, new_amount=Uint256(0, 0))
     let (new_claimed_amount : Uint256, carry) = uint256_add(
         claimed_amount, reward_for_current_asset
@@ -633,8 +650,46 @@ func _claim_current_reward_for_all_assets_inner{
     )
 end
 
+
+
+func _claim_all_rewards_recursive_transfer{
+    syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
+}(
+    reward_addresses_list_len,
+    reward_addresses_list : felt*,
+    claimed_amounts_len,
+    claimed_amounts : Uint256*,
+    user_address,
+    to_address,
+    claimer_address,
+):
+    # Gets the current reward address and claimed amount
+    let amount : Uint256 = [claimed_amounts]
+    let reward_address = [reward_addresses_list]
+    _transfer_rewards(to_address, reward_address, amount)
+    
+    rewards_claimed.emit(user_address, reward_address, to_address, claimer_address, amount)
+    
+    _claim_all_rewards_recursive_transfer(
+        reward_addresses_list_len - 1,
+        reward_addresses_list + 1,
+        claimed_amounts_len - 1,
+        claimed_amounts + Uint256.SIZE,
+        user_address,
+        to_address,
+        claimer_address,
+    )
+    return ()
+end
+
 # --------------------------------------------------------
+# --------------------------------------------------------
+# 
 # Rewards Distributor
+#
+# Minimal implementation of some elements from `RewardsDistributor.sol`
+#
+# --------------------------------------------------------
 # --------------------------------------------------------
 
 # --------------------------------------------------------
@@ -644,21 +699,12 @@ end
 # Big difference from the solidity code: struct AssetData contains two mappings which AFAIK cannot be reproduced in Cairo.
 # Instead, we use storage variables `asset_and_reward_to_reward_data` and `available_rewards`
 struct AssetData:
-    # NOTE: This is a uint128 in solidity, so we could use a felt here, but it could run into incompatibilities later if it has to be operated with a Uint256
+    # NOTE: This is a uint128 in solidity, so we could use a felt here,
+    # but it could run into incompatibilities later if it has to be operated with a Uint256
     member available_rewards_count : Uint256
     member decimals : felt
 end
 
-# Replaces `mapping(address => RewardData) rewards;` from AssetData
-@storage_var
-func asset_and_reward_to_RewardData(asset_address, reward_address) -> (data : RewardData):
-end
-
-# Replaces `mapping(uint128 => address) availableRewards;` from AssetData
-# The uint128 is an index 
-@storage_var
-func available_rewards(asset_address, reward_address_index) -> (reward_address):
-end
 
 # "Tied" to an asset_address and a reward_address
 struct RewardData:
@@ -668,23 +714,35 @@ struct RewardData:
     member distribution_end : felt
 end
 
-# Replaces `mapping(address => UserData) usersData;` in RewardData
+
+# Replaces `mapping(address => RewardData) rewards;` from AssetData
 @storage_var
-func asset_reward_and_user_to_UserData(asset_address, reward_address, user_address) -> (
-    res : UserData
-):
+func asset_and_reward_to_RewardData(asset_address, reward_address) -> (data : RewardData):
 end
+
+# Replaces `mapping(uint128 => address) availableRewards;` from AssetData
+# The uint128 is an index
+@storage_var
+func available_rewards(asset_address, reward_address_index) -> (reward_address):
+end
+
 
 # "Tied" to an asset_address, a reward_address, and a user_address
 # Indicates amount of reward accrued by the user for the asset
 struct UserData:
-    # matches the index in the corresponding `RewardData` 
+    # matches the index in the corresponding `RewardData`
     # i.e. `asset_and_reward_to_reward_data(asset_address, reward_address).index`
     member index : felt
     # uint128 in solidity, but we will need to operate it with Uint256's
     member accrued : Uint256
 end
 
+# Replaces `mapping(address => UserData) usersData;` in RewardData
+@storage_var
+func asset_reward_and_user_to_UserData(asset_address, reward_address, user_address) -> (
+    res : UserData
+):
+end
 
 
 # --------------------------------------------
@@ -704,7 +762,7 @@ end
 func _reward_addresses_list_len() -> (len):
 end
 
-# Asserts that the caller is is the emission_manager (= the admin)
+# Asserts that the caller is the emission_manager (= the admin)
 func only_emission_manager{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr}():
     # Equivalent of `msg.sender`
     let (caller_address) = get_caller_address()
@@ -715,7 +773,7 @@ func only_emission_manager{syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, ran
     return ()
 end
 
-# Functions from RewardsDistributor.sol, added here as dummys
+# Two function from RewardsDistributor.sol, added here as dummys
 func _configure_assets_RewardDistributor{
     syscall_ptr : felt*, pedersen_ptr : HashBuiltin*, range_check_ptr
 }(config_len, config : RewardsConfigInput*):
